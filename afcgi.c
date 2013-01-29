@@ -77,7 +77,7 @@ accept:
   }
 
   recv_loop(client_fd);
-  exit(0);
+  goto accept;
 
 out:
 

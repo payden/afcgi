@@ -7,6 +7,8 @@
 #include "fastcgi.h"
 
 #define MAX_REQUESTS 65536
+#define STATE_RECEIVED_BEGIN 1
+
 
 struct fcgi_request_s {
   unsigned short id;
@@ -14,7 +16,8 @@ struct fcgi_request_s {
   unsigned short stdin_len;
   char *params_buf;
   char *stdin_buf;
-  unsigned char reserved[2];
+  unsigned char state;
+  unsigned char reserved;
 };
 
 typedef struct fcgi_request_s fcgi_request_t;
@@ -40,23 +43,44 @@ void make_fcgi_header(fcgi_header *hdr, unsigned short request_id, unsigned shor
   hdr->requestIdB0 = request_id & 0xff;
 }
 
-void process_record(record_buf_t *rec, int sockfd)
+int process_record(record_buf_t *rec, int sockfd)
 {
   int x;
   char out_buf_temp[1024];
   char timestr[200];
+  unsigned short req_id;
+  fcgi_begin_request *begin_req;
+  fcgi_request_t *cur_req = NULL;
   fcgi_header *resp_hdr;
   fcgi_header *hdr = (fcgi_header *)rec->start;
-  fprintf(stderr, "Just dumping record info for now.\n");
-  fprintf(stderr, "Request id: %hu\n", (hdr->requestIdB1 << 8) + hdr->requestIdB0);
-  fprintf(stderr, "Type: %u\n", hdr->type);
-  fprintf(stderr, "Content Length: %hu\n", (hdr->contentLengthB1 << 8) + hdr->contentLengthB0);
-  fprintf(stderr, "Padding Length: %u\n", hdr->paddingLength);
-  fprintf(stderr, "Actually received: %u\n", rec->pos - rec->start);
-  fprintf(stderr, "Data coming your way:\n");
-  for(x=0;x<sizeof(fcgi_header) + (hdr->contentLengthB1 << 8) + hdr->contentLengthB0 + hdr->paddingLength;x++) {
-    fprintf(stderr, "%02x ", *(rec->start + x) & 0xff);
+  req_id = (hdr->requestIdB1 << 8) + hdr->requestIdB0;
+  cur_req = _requests[req_id];
+  if(!cur_req) {
+    cur_req = (fcgi_request_t *)malloc(sizeof(fcgi_request_t));
+    memset(cur_req, 0, sizeof(fcgi_request_t));
+    cur_req->id = req_id;
   }
+  switch(hdr->type) {
+    case FCGI_BEGIN_REQUEST:
+      begin_req = (fcgi_begin_request *)(rec->start + sizeof(fcgi_header));
+      fprintf(stderr, "Received begin request.\n");
+      fprintf(stderr, "Role: %hu\n", (begin_req->roleB1 << 8) + begin_req->roleB0);
+      fprintf(stderr, "Flags: %u\n", begin_req->flags);
+      req->state = STATE_RECEIVED_BEGIN;
+      break;
+    case FCGI_PARAMS:
+      //handle fcgi_params
+      break;
+    case FCGI_STDIN:
+      //handle fcgi_stdin
+      break;
+    default:
+      break;
+  }
+
+
+
+  /*
   if(hdr->type == FCGI_STDIN) {
     fprintf(stderr, "Sending back a response!\n");
     make_fcgi_header((fcgi_header *)&out_buf_temp, (hdr->requestIdB1 << 8) + hdr->requestIdB0, FCGI_STDOUT);
@@ -70,7 +94,18 @@ void process_record(record_buf_t *rec, int sockfd)
     memset(&out_buf_temp[8], 0, 8);
     send(sockfd, out_buf_temp, sizeof(fcgi_header) + 8, 0);
     close(sockfd);
+    if(cur_req) {
+      if(cur_req->stdin_buf) {
+        free(cur_req->stdin_buf);
+      }
+      if(cur_req->params_buf) {
+        free(cur_req->params_buf);
+      }
+    }
+    return 0;
   }
+  */
+  return 1;
 
 }
 
@@ -125,6 +160,7 @@ newrec:
       current_request_id = (hdr->requestIdB1 << 8) + hdr->requestIdB0;
       current_record_content_length = (hdr->contentLengthB1 << 8) + hdr->contentLengthB0;
       current_record_padding_length = hdr->paddingLength;
+
       fprintf(stderr, "In recv_loop current_request_id, content_length, padding_length: %hu, %hu, %u\n", current_request_id, current_record_content_length, current_record_padding_length);
 
     }
@@ -133,7 +169,12 @@ newrec:
       fprintf(stderr, "Continuing not enough data yet.\n");
       continue;
     }
-    process_record(record_buf, sockfd);
+    if(!process_record(record_buf, sockfd)) {
+      if(record_buf->real_start) {
+        free(record_buf->real_start);
+      }
+      return 0;
+    }
     record_buf->start += sizeof(fcgi_header) + current_record_content_length + current_record_padding_length;
     if(record_buf->pos - record_buf->start > 0) {
       goto newrec;
