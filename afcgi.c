@@ -5,7 +5,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-
+#include <unistd.h>
 
 #include "afcgi.h"
 
@@ -17,6 +17,7 @@ int main(int argc, char **argv)
   int rv;
   int listen_fd;
   int yes = 1;
+  int client_fd;
 
   memset(&hints, 0, sizeof(struct addrinfo));
   hints.ai_family = AF_UNSPEC;
@@ -58,9 +59,31 @@ int main(int argc, char **argv)
     exit(-3);
   }
 
+  int i;
+  for(i=0;i<4;i++) {
+    if(!fork()) {
+      goto accept;
+    }
+  }
+  goto out;
+
+accept:
+
   addrsize = sizeof(struct sockaddr_in);
-  fprintf(stderr, "Accepted: %d\n", accept(listen_fd, (struct sockaddr *)&addr, &addrsize));
-  perror("accept");
+  client_fd = accept(listen_fd, (struct sockaddr *)&addr, &addrsize);
+  if(client_fd == -1) {
+    perror("accept");
+    exit(-3);
+  }
+
+  recv_loop(client_fd);
+  exit(0);
+
+out:
+
+  for(i=0;i<4;i++) {
+    wait(NULL);
+  }
   fprintf(stderr, "Done.\n");
   
   return 0;
