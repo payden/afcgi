@@ -53,7 +53,7 @@ void dump_params(fcgi_request_t *req)
     switch(state) {
       case name_length:
         if((*idx & 0x80) == 0x80) {
-          nlen = (*idx << 24) + (*(idx+1) << 16) + (*(idx+2) << 8) + (*(idx+3) & 0xff);
+          nlen = ((*idx & 0x7f) << 24) + (*(idx+1) << 16) + (*(idx+2) << 8) + (*(idx+3) & 0xff);
           idx += 4;
         } else {
           nlen = *idx & 0xff;
@@ -63,7 +63,7 @@ void dump_params(fcgi_request_t *req)
         break;
       case value_length:
         if((*idx & 0x80) == 0x80) {
-          vlen = (*idx << 24) + (*(idx+1) << 16) + (*(idx+2) << 8) + (*(idx+3) & 0xff);
+          vlen = ((*idx & 0x7f) << 24) + (*(idx+1) << 16) + (*(idx+2) << 8) + (*(idx+3) & 0xff);
           idx += 4;
         } else {
           vlen = *idx & 0xff;
