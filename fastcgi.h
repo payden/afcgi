@@ -20,6 +20,9 @@
 
 /* FastCGI protocol */
 
+#ifndef _FASTCGI_H
+#define _FASTCGI_H
+
 #define FCGI_VERSION_1 1
 
 #define FCGI_MAX_LENGTH 0xffff
@@ -88,4 +91,4 @@ typedef struct _fcgi_end_request_rec {
 	fcgi_header hdr;
 	fcgi_end_request body;
 } fcgi_end_request_rec;
-
+#endif
