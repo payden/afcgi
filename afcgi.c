@@ -70,14 +70,18 @@ int afcgi_finish_request(fcgi_request_t *req)
 int afcgi_send_stdout(fcgi_request_t *req, const char *str, uint str_length)
 {
   char buf[1024 * 8];
+  int n;
+  uint max = (1024 * 8) - sizeof(fcgi_header);
+  uint to_send = MIN(max, str_length);
   char *body = &buf[sizeof(fcgi_header)];
   fcgi_header *hdr = (fcgi_header *)&buf[0];
   make_fcgi_header(hdr, req->id, FCGI_STDOUT);
-  hdr->contentLengthB1 = (str_length >> 8) & 0xff;
-  hdr->contentLengthB0 = str_length & 0xff;
-  memcpy(body, str, str_length);
-  *(body+str_length) = '\0';
-  return send(req->sockfd, buf, sizeof(fcgi_header) + str_length, 0);
+  hdr->contentLengthB1 = (to_send >> 8) & 0xff;
+  hdr->contentLengthB0 = to_send & 0xff;
+  memcpy(body, str, to_send);
+  *(body+to_send) = '\0';
+  n = send(req->sockfd, buf, sizeof(fcgi_header) + to_send, 0);
+  return n - sizeof(fcgi_header);
 }
 
 
@@ -90,15 +94,22 @@ static inline size_t sapi_afcgi_single_write(const char *str, uint str_length TS
 
 static int sapi_afcgi_ub_write(const char *str, uint str_length TSRMLS_DC)
 {
+  uint bytes_sent = 0;
+  uint tmp_sent;
   fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
-  afcgi_send_stdout(req, str, str_length);
-  fprintf(stdout, "ub_write (%u): %s\n", str_length, str);
-  return (size_t) str_length;
+
+  while(bytes_sent < str_length) {
+    tmp_sent = afcgi_send_stdout(req, str + bytes_sent, str_length - bytes_sent);
+    if(tmp_sent <= 0) {
+      break;
+    }
+    bytes_sent += tmp_sent;
+  }
+  return (size_t) bytes_sent;
 }
 
 static void sapi_afcgi_flush(void *server_context)
 {
-  fprintf(stderr, "server_context passed to afcgi_flush: %08x\n", server_context);
   if (fflush(stdout) == EOF) {
     php_handle_aborted_connection();
   }
@@ -147,9 +158,7 @@ static int sapi_afcgi_read_post(char *buffer, uint count_bytes TSRMLS_DC)
   fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
   count_bytes = MIN(SG(request_info).content_length - SG(read_post_bytes), count_bytes);
   if(count_bytes > 0) {
-    fprintf(stderr, "req->stdin_buf: %s\n", req->stdin_buf);
     memcpy(buffer, req->stdin_buf, count_bytes);
-    fprintf(stderr, "buffer: %s\n", buffer);
   }
 
   return count_bytes;
@@ -158,11 +167,32 @@ static int sapi_afcgi_read_post(char *buffer, uint count_bytes TSRMLS_DC)
 
 static char *sapi_afcgi_read_cookies(TRSMLS_D)
 {
+  fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
+  if(req) {
+    return afcgi_getenv(req, "HTTP_COOKIE");
+  }
   return "";
 }
 
 static void sapi_afcgi_register_variables(zval *track_vars_array TSRMLS_DC)
 {
+  fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
+  char *request_uri = afcgi_getenv(req, "REQUEST_URI");
+  char *request_method = afcgi_getenv(req, "REQUEST_METHOD");
+  char *remote_addr = afcgi_getenv(req, "REMOTE_ADDR");
+  if(request_uri) {
+    php_register_variable("REQUEST_URI", request_uri, track_vars_array TSRMLS_CC);
+    free(request_uri);
+  }
+  if(request_method) {
+    php_register_variable("REQUEST_METHOD", request_method, track_vars_array TSRMLS_CC);
+    free(request_method);
+  }
+  if(remote_addr) {
+    php_register_variable("REMOTE_ADDR", remote_addr, track_vars_array TSRMLS_CC);
+    free(remote_addr);
+  }
+
 }
 
 static int sapi_afcgi_activate(TSRMLS_D)
@@ -185,6 +215,9 @@ static int sapi_afcgi_deactivate(TSRMLS_D)
   }
   if(SG(request_info).query_string) {
     free(SG(request_info).query_string);
+  }
+  if(SG(request_info).request_method) {
+    free(SG(request_info).request_method);
   }
   fprintf(stderr, "afcgi_deactivate called.\n");
   return SUCCESS;
@@ -248,6 +281,7 @@ static void init_request_info(TSRMLS_D)
   char *script_name = afcgi_getenv(req, "SCRIPT_FILENAME");
   char *request_uri = afcgi_getenv(req, "REQUEST_URI");
   char *query_string = afcgi_getenv(req, "QUERY_STRING");
+  char *request_method = afcgi_getenv(req, "REQUEST_METHOD");
   if(content_length) {
     SG(request_info).content_length = atoi(content_length);
   }
@@ -263,6 +297,9 @@ static void init_request_info(TSRMLS_D)
   }
   if(query_string) {
     SG(request_info).query_string = query_string;
+  }
+  if(request_method) {
+    SG(request_info).request_method = request_method;
   }
 }
 
@@ -321,24 +358,6 @@ char *afcgi_getenv(fcgi_request_t *req, const char *search_name)
   return ret;
 }
 
-
-void send_response(fcgi_request_t *req, int sockfd)
-{
-  char outbuf[1024];
-  fcgi_header *hdr = (fcgi_header *)&outbuf[0];
-  char *body = &outbuf[sizeof(fcgi_header)];
-  make_fcgi_header(hdr, req->id, FCGI_STDOUT);
-  snprintf(body, 1016, "Content-Type: text/html\n\n<html>\n<head>\n<title>Test</title>\n</head>\n<body>\n<div>Test.</div>\n</body>\n</html>\n");
-  hdr->contentLengthB0 = strlen(body);
-  send(sockfd, outbuf, sizeof(fcgi_header) + strlen(body), 0);
-  hdr->contentLengthB0 = 0;
-  send(sockfd, outbuf, sizeof(fcgi_header), 0);
-  memset(body, 0, sizeof(fcgi_end_request));
-  hdr->type = FCGI_END_REQUEST;
-  send(sockfd, outbuf, sizeof(fcgi_header) + sizeof(fcgi_end_request), 0);
-  close(sockfd);
-}
-
 void make_fcgi_header(fcgi_header *hdr, unsigned short request_id, unsigned short type)
 {
   memset(hdr, 0, sizeof(fcgi_header));
@@ -374,9 +393,6 @@ int process_record(record_buf_t *rec, int sockfd)
   switch(hdr->type) {
     case FCGI_BEGIN_REQUEST:
       begin_req = (fcgi_begin_request *)(rec->start + sizeof(fcgi_header));
-      fprintf(stderr, "Received begin request.\n");
-      fprintf(stderr, "Role: %hu\n", (begin_req->roleB1 << 8) + begin_req->roleB0);
-      fprintf(stderr, "Flags: %u\n", begin_req->flags);
       fprintf(stderr, "Changing state to STATE_RECEIVED_BEGIN\n");
       cur_req->state = STATE_RECEIVED_BEGIN;
       break;
@@ -414,23 +430,22 @@ int process_record(record_buf_t *rec, int sockfd)
         //either empty FCGI_STDIN or we've received it already.
         fprintf(stderr, "Changing state to STATE_RECEIVED_STDIN\n");
         cur_req->state = STATE_RECEIVED_STDIN;
-        fprintf(stderr, "Dumping stdin: %s\n", cur_req->stdin_buf);
-        fprintf(stderr, "Let's send a response and close this request out.\n");
         SG(server_context) = (void *)cur_req;
+        init_request_info(TSRMLS_C);
         if (php_request_startup(TSRMLS_C) == FAILURE) {
           fprintf(stderr, "php_request_startup failure.\n");
           exit(0);
         }
-        init_request_info(TSRMLS_C);
         if (php_fopen_primary_script(&file_handle TSRMLS_CC) == FAILURE) {
           fprintf(stderr, "open_primary_script failed.\n");
           exit(0);
         }
+        fprintf(stderr, "Request method: %s\n", SG(request_info).request_method);
+        fprintf(stderr, "Post data: %s\n", SG(request_info).post_data);
         php_execute_script(&file_handle TSRMLS_CC);
         STR_FREE(SG(request_info).path_translated);
         SG(request_info).path_translated = NULL;
         php_request_shutdown((void *)0);
-        fprintf(stderr, "Post data: %s\n", SG(request_info).post_data);
         SG(server_context) = NULL;
         if(cur_req->stdin_buf) {
           free(cur_req->stdin_buf);
@@ -460,31 +475,6 @@ int process_record(record_buf_t *rec, int sockfd)
 
 
 
-  /*
-  if(hdr->type == FCGI_STDIN) {
-    fprintf(stderr, "Sending back a response!\n");
-    make_fcgi_header((fcgi_header *)&out_buf_temp, (hdr->requestIdB1 << 8) + hdr->requestIdB0, FCGI_STDOUT);
-    snprintf(timestr, 200, "Content-Type: text/html\n\n<html><body><h1>The Current epoch is: %d</h1></body></html>\n", time(NULL));
-    strncpy(&out_buf_temp[8], timestr, 200);
-    ((fcgi_header *)&out_buf_temp)->contentLengthB0 = strlen(timestr);
-    send(sockfd, out_buf_temp, sizeof(fcgi_header) + strlen(timestr), 0);
-    ((fcgi_header *)&out_buf_temp)->contentLengthB0 = 0;
-    send(sockfd, out_buf_temp, sizeof(fcgi_header), 0);
-    ((fcgi_header *)&out_buf_temp)->type = FCGI_END_REQUEST;
-    memset(&out_buf_temp[8], 0, 8);
-    send(sockfd, out_buf_temp, sizeof(fcgi_header) + 8, 0);
-    close(sockfd);
-    if(cur_req) {
-      if(cur_req->stdin_buf) {
-        free(cur_req->stdin_buf);
-      }
-      if(cur_req->params_buf) {
-        free(cur_req->params_buf);
-      }
-    }
-    return 0;
-  }
-  */
   return 1;
 
 }
@@ -534,24 +524,23 @@ int recv_loop(int sockfd)
 
     if(new_record) {
 newrec:
-      fprintf(stderr, "New record.\n");
+      fprintf(stderr, "DEBUG: New FCGI record.\n");
       if(record_buf->pos - record_buf->start < 8) {
-        fprintf(stderr, "Haven't received 8 bytes yet.\n");
+        fprintf(stderr, "DEBUG: Haven't received 8 bytes yet.\n");
         continue;
       }
-      fprintf(stderr, "Set new record to zero.\n");
       new_record = 0;
       hdr = (fcgi_header *)record_buf->start;
       current_request_id = (hdr->requestIdB1 << 8) + hdr->requestIdB0;
       current_record_content_length = (hdr->contentLengthB1 << 8) + hdr->contentLengthB0;
       current_record_padding_length = hdr->paddingLength;
 
-      fprintf(stderr, "In recv_loop current_request_id, content_length, padding_length: %hu, %hu, %u\n", current_request_id, current_record_content_length, current_record_padding_length);
+      fprintf(stderr, "DEBUG: FCGI Record Info\n  current_request_id: %hu\n  content_length: %hu\n  padding_length: %u\n\n", current_request_id, current_record_content_length, current_record_padding_length);
 
     }
 
     if(record_buf->pos - record_buf->start < sizeof(fcgi_header) + current_record_content_length + current_record_padding_length) {
-      fprintf(stderr, "Continuing not enough data yet.\n");
+      fprintf(stderr, "DEBUG: Continuing not enough data yet.\n");
       continue;
     }
     if(!process_record(record_buf, sockfd)) {
@@ -569,14 +558,14 @@ newrec:
     new_record = 1;
     record_buf->pos = record_buf->start = record_buf->real_start;
   }
-  fprintf(stderr, "Connection was closed.\nChild exiting.\n");
+  fprintf(stderr, "DEBUG: Connection closed.\n\n");
   return 0;
 }
 
 int main(int argc, char **argv)
 {
   zend_file_handle file_handle;
-
+  signal(SIGPIPE, SIG_IGN);
 #ifdef ZTS
   void ***tsrm_ls;
   tsrm_startup(1, 1, 0, NULL);
