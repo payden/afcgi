@@ -521,12 +521,20 @@ int process_record(record_buf_t *rec, int sockfd)
           exit(0);
         }
         if (php_fopen_primary_script(&file_handle TSRMLS_CC) == FAILURE) {
-          fprintf(stderr, "open_primary_script failed.\n");
-          exit(0);
+          zend_try {
+            if (errno == EACCES) {
+              SG(sapi_headers).http_response_code = 403;
+              PUTS("Access denied.\n");
+            } else {
+              SG(sapi_headers).http_response_code = 404;
+              PUTS("No input file specified.\n");
+            }
+          } zend_catch {
+          } zend_end_try();
+
+        } else {
+          php_execute_script(&file_handle TSRMLS_CC);
         }
-        fprintf(stderr, "Request method: %s\n", SG(request_info).request_method);
-        fprintf(stderr, "Post data: %s\n", SG(request_info).post_data);
-        php_execute_script(&file_handle TSRMLS_CC);
         STR_FREE(SG(request_info).path_translated);
         SG(request_info).path_translated = NULL;
         php_request_shutdown((void *)0);
@@ -721,7 +729,7 @@ int main(int argc, char **argv)
   }
 
   int i;
-  for(i=0;i<1;i++) {
+  for(i=0;i<4;i++) {
     if(!fork()) {
       goto accept;
     }
