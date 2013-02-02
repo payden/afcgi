@@ -49,6 +49,104 @@
 
 char *afcgi_getenv(fcgi_request_t *req, const char *search_name);
 
+
+void ht_el_free(hash_el_t *el)
+{
+  if(el) {
+    if(el->key) {
+      free(el->key);
+    }
+    if(el->value) {
+      free(el->value);
+    }
+    free(el);
+  }
+}
+
+void ht_init(hash_table_t *ht, unsigned int size)
+{
+  ht->size = size;
+  ht->buckets = (hash_el_t **)malloc(sizeof(hash_el_t *) * size);
+  if(!ht->buckets) {
+    fprintf(stderr, "Unable to allocate memory for hash table. FAIL HARD.\n");
+    exit(0);
+  }
+  memset(ht->buckets, 0, sizeof(hash_el_t *) * size);
+}
+
+void ht_destroy(hash_table_t *ht)
+{
+  if(ht) {
+    int i;
+    hash_el_t *cur, *next;
+    for(i = 0; i < ht->size; i++) {
+      cur = *(ht->buckets + i);
+      if(cur) {
+        do {
+          next = cur->next;
+          ht_el_free(cur);
+          cur = next;
+        } while(cur);
+      }
+    }
+    free(ht->buckets);
+  }
+}
+
+unsigned int ht_func(hash_table_t *ht, const char *keystring)
+{
+  if(!keystring) {
+    return 0xffffffff;
+  }
+  int sum = 0, i;
+  for(i = 0; i < strlen(keystring); i++) {
+    sum += *(keystring+i);
+  }
+
+  return sum % ht->size;
+}
+
+void ht_add(hash_table_t *ht, const char *keystring, size_t keylen, const char *value, size_t vallen)
+{
+  char *k = NULL, *v = NULL;
+  hash_el_t *head = NULL, *new = NULL;
+  unsigned int key;
+  k = strndup(keystring, keylen);
+  v = strndup(value, vallen);
+  key = ht_func(ht, k);
+  head = *(ht->buckets + key);
+  new = (hash_el_t *)malloc(sizeof(hash_el_t));
+  memset(new, 0, sizeof(hash_el_t));
+  new->key = k;
+  new->value = v;
+
+  if(head) {
+    for(;head->next != NULL; head = head->next) {};
+    head->next = new;
+  } else {
+    *(ht->buckets + key) = new;
+  }
+}
+
+hash_el_t *ht_find(hash_table_t *ht, const char *keystring)
+{
+  unsigned int key = ht_func(ht, keystring);
+  hash_el_t *found = NULL;
+  found = *(ht->buckets + key);
+  if(!found) {
+    return found;
+  }
+
+  do {
+    if(strcmp(found->key, keystring) == 0) {
+      return found;
+    }
+    found = found->next;
+  } while(found);
+
+  return found;
+} 
+
 int afcgi_finish_request(fcgi_request_t *req)
 {
   char buf[16];
@@ -177,22 +275,18 @@ static char *sapi_afcgi_read_cookies(TRSMLS_D)
 static void sapi_afcgi_register_variables(zval *track_vars_array TSRMLS_DC)
 {
   fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
-  char *request_uri = afcgi_getenv(req, "REQUEST_URI");
-  char *request_method = afcgi_getenv(req, "REQUEST_METHOD");
-  char *remote_addr = afcgi_getenv(req, "REMOTE_ADDR");
-  if(request_uri) {
-    php_register_variable("REQUEST_URI", request_uri, track_vars_array TSRMLS_CC);
-    free(request_uri);
+  hash_el_t *el;
+  hash_table_t *ht = &req->params_hash;
+  int i;
+  if(req->params_hash.buckets) {
+    for(i = 0; i < ht->size; i++) {
+      el = *(ht->buckets + i);
+      while(el) {
+        php_register_variable(el->key, el->value, track_vars_array TSRMLS_CC);
+        el = el->next;
+      }
+    }
   }
-  if(request_method) {
-    php_register_variable("REQUEST_METHOD", request_method, track_vars_array TSRMLS_CC);
-    free(request_method);
-  }
-  if(remote_addr) {
-    php_register_variable("REMOTE_ADDR", remote_addr, track_vars_array TSRMLS_CC);
-    free(remote_addr);
-  }
-
 }
 
 static int sapi_afcgi_activate(TSRMLS_D)
@@ -206,18 +300,6 @@ static int sapi_afcgi_deactivate(TSRMLS_D)
   if(SG(sapi_started) && SG(server_context)) {
     fcgi_request_t *req = (fcgi_request_t *)SG(server_context);
     afcgi_finish_request(req);
-  }
-  if(SG(request_info).content_type) {
-    free((void *)SG(request_info).content_type);
-  }
-  if(SG(request_info).request_uri) {
-    free(SG(request_info).request_uri);
-  }
-  if(SG(request_info).query_string) {
-    free(SG(request_info).query_string);
-  }
-  if(SG(request_info).request_method) {
-    free(SG(request_info).request_method);
   }
   fprintf(stderr, "afcgi_deactivate called.\n");
   return SUCCESS;
@@ -290,7 +372,6 @@ static void init_request_info(TSRMLS_D)
   }
   if(script_name) {
     SG(request_info).path_translated = estrdup(script_name);
-    free(script_name);
   }
   if(request_uri) {
     SG(request_info).request_uri = request_uri;
@@ -305,12 +386,27 @@ static void init_request_info(TSRMLS_D)
 
 char *afcgi_getenv(fcgi_request_t *req, const char *search_name)
 {
+  hash_el_t *el;
+  el = ht_find(&req->params_hash, search_name);
+  if(el) {
+    return el->value;
+  }
+  return NULL;
+}
+
+void populate_params_hash(fcgi_request_t *req)
+{
   enum {name_length, value_length, name, value} state;
   unsigned int nlen;
   unsigned int vlen;
-  unsigned int search_len = strlen(search_name);
-  char *ret = NULL;
   state = name_length;
+  hash_table_t *ht = &req->params_hash;
+
+  if(ht->buckets) {
+    ht_destroy(ht);
+  }
+
+  ht_init(ht, 256);
 
   char *idx = req->params_buf;
   while(idx < req->params_pos) {
@@ -334,28 +430,15 @@ char *afcgi_getenv(fcgi_request_t *req, const char *search_name)
           vlen = *idx & 0xff;
           idx++;
         }
-        state = name;
-        break;
-      case name:
-        if(nlen == search_len && strncmp(search_name, idx, nlen) == 0) {
-          idx += nlen;
-          ret = (char *)malloc(vlen + 1);
-          memcpy(ret, idx, vlen);
-          *(ret+vlen) = '\0';
-          return ret;
-        }
-        idx += nlen;
-        state = value;
-        break;
-      case value:
-        idx += vlen;
+        //at this point we should be pointing at name data and have both name length and value length, add them to hash
+        ht_add(ht, idx, nlen, idx+nlen, vlen);
+        idx += (nlen + vlen);
         state = name_length;
         break;
       default:
         break;
     }
   }
-  return ret;
 }
 
 void make_fcgi_header(fcgi_header *hdr, unsigned short request_id, unsigned short type)
@@ -405,6 +488,7 @@ int process_record(record_buf_t *rec, int sockfd)
       if(rec_len == 0) {
         //hit empty FCGI_PARAMS record so we're finished filling params_buf
         fprintf(stderr, "Changing state to STATE_RECEIVED_PARAMS\n");
+        populate_params_hash(cur_req);
         cur_req->state = STATE_RECEIVED_PARAMS;
         break;
       }
@@ -452,6 +536,9 @@ int process_record(record_buf_t *rec, int sockfd)
         }
         if(cur_req->params_buf) {
           free(cur_req->params_buf);
+        }
+        if(cur_req->params_hash.buckets) {
+          ht_destroy(&cur_req->params_hash);
         }
         _requests[req_id] = NULL;
         free(cur_req);
@@ -557,6 +644,12 @@ newrec:
     //processed all records and data
     new_record = 1;
     record_buf->pos = record_buf->start = record_buf->real_start;
+  }
+  if(record_buf) {
+    if(record_buf->real_start) {
+      free(record_buf->real_start);
+    }
+    free(record_buf);
   }
   fprintf(stderr, "DEBUG: Connection closed.\n\n");
   return 0;
