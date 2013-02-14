@@ -46,7 +46,6 @@
 #include "afcgi.h"
 
 
-
 char *afcgi_getenv(fcgi_request_t *req, const char *search_name);
 
 
@@ -278,6 +277,10 @@ static void sapi_afcgi_register_variables(zval *track_vars_array TSRMLS_DC)
   hash_el_t *el;
   hash_table_t *ht = &req->params_hash;
   int i;
+
+  //register some additional variables
+  php_register_variable("PHP_SELF", afcgi_getenv(req, "SCRIPT_NAME"), track_vars_array TSRMLS_CC);
+
   if(req->params_hash.buckets) {
     for(i = 0; i < ht->size; i++) {
       el = *(ht->buckets + i);
@@ -495,7 +498,7 @@ int process_record(record_buf_t *rec, int sockfd)
 
       //realloc if incoming FCGI_PARAMS are larger than params_buf, remember to track params_pos - params_buf offset because realloc may move memory location
       if(cur_req->params_sz - (cur_req->params_pos - cur_req->params_buf) <= rec_len) {
-        cur_req->params_sz *= 2;
+        cur_req->params_sz *= 2 + rec_len;
         offset = cur_req->params_pos - cur_req->params_buf;
         cur_req->params_buf = (char *)realloc(cur_req->params_buf, cur_req->params_sz);
         cur_req->params_pos = cur_req->params_buf + offset;
@@ -555,7 +558,7 @@ int process_record(record_buf_t *rec, int sockfd)
       }
 
       if(cur_req->stdin_sz - (cur_req->stdin_pos - cur_req->stdin_buf) <= rec_len) {
-        cur_req->stdin_sz *= 2;
+        cur_req->stdin_sz *= 2 + rec_len;
         offset = cur_req->stdin_pos - cur_req->stdin_buf;
         cur_req->stdin_buf = (char *)realloc(cur_req->stdin_buf, cur_req->stdin_sz);
         cur_req->stdin_pos = cur_req->stdin_buf + offset;
